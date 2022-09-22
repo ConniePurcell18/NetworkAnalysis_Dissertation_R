@@ -1,0 +1,760 @@
+---
+title: "CP_CILSPrep"
+output:
+  word_document: default
+  html_document:
+    df_print: paged
+---
+
+## R Markdown
+
+Load in libraries I will be using for this project
+
+```{r message=FALSE, warning=FALSE}
+
+library(statnet)
+library(foreign)
+library(readstata13)
+library(tidyr)
+library(dplyr)
+library(knitr)
+library(sna)
+
+
+```
+
+Delete memory so that workspace is blank when running code
+```{r setup}
+
+#Deleting memory and resetting global environment
+rm(list=ls())
+
+setwd("~/University/Project/Code")
+knitr::opts_knit$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = normalizePath("~/University/Project/Code"))
+getwd()
+
+```
+
+## Generate the network objects for Wave 1 of the CILS4EU Germany Data
+
+Gather classmate data for Wave 1
+
+```{r message=FALSE, warning=FALSE}
+
+classmates.raw <- read.dta13("youth classmates/w1_yc_ge_v1.2.0_rv.dta")
+
+# Variables of interest - only keep the meta-data and the best friends data
+vi<- c("youthid", "classid", "schoolid", "y1_nnominatorG","y1_outnomsG","y1_absnomsG", "y1_classid_matchG", "y1_bfs_1", "y1_bfs_2","y1_bfs_3", "y1_bfs_4", "y1_bfs_5")
+
+# Limit data to classes where nobody moved and where only present students could be nominated 
+valid<- (classmates.raw[,"y1_classid_matchG"] == 1 & classmates.raw[,"y1_absnomsG"] == 0 & classmates.raw[,"y1_classid_matchG"] == 1)
+classmates<- classmates.raw[valid, vi]
+nets<-list()
+
+# For each classid
+classids <- unique(classmates[,"classid"])
+
+
+```
+
+Loop over classmates data for Wave 1 of the CILS4EU Germany Data
+
+```{r warning=FALSE}
+i <- 1
+for (cid in classids) {
+class <- classmates[classmates$classid == cid, ]
+  
+  # These are the unique ids of all adolescents in classid = cid who answered the survey of friendship ties.
+  class.youthids<- unique(class$youthid)
+  class.bfs <- class[,c("youthid","y1_bfs_1", "y1_bfs_2","y1_bfs_3", "y1_bfs_4", "y1_bfs_5")]
+  
+  
+  # This generates a clean edgelist for each network
+  class.edgelist <- class.bfs %>% gather(x, alter, y1_bfs_1:y1_bfs_5)
+  class.edgelist <- class.edgelist[class.edgelist$alter>0, c("youthid", "alter")]
+  
+  # Turn the values in the edgelist into characters.
+  ego<-as.character(class.edgelist[,"youthid"])
+  alter<-as.character(class.edgelist[,"alter"])
+  
+  # This check is needed in case the edgelist is empty
+  if (length(ego)>0) {
+    n<-network(cbind(ego, alter), matrix.type = "edgelist")
+    n %n% "classid" <- cid
+    nets[[i]]<- n
+    i<-i+1
+  }
+}
+
+```
+
+## Adds Wave 1 Data from the main survey of the CILS4EU Germany Data
+
+Extract data from main survey Germany Wave 1
+
+```{r warning=FALSE}
+
+main.raw <- read.dta13("youth main/w1_ym_ge_v1.2.0_rv.dta")
+
+#Convert all values that represent missing information to NA values
+main.raw[main.raw == -55] <- NA
+main.raw[main.raw == -88] <- NA
+main.raw[main.raw == -77] <- NA
+main.raw[main.raw == -99] <- NA
+
+```
+
+Loop over main survey to find data for students that took part in the classmates friendship survey and main survey
+```{r}
+
+# Run through all networks
+for (i in 1:length(nets)){
+
+  # Extract youthids for one network. This will be used to match with the main survey.
+  youthid <- as.numeric(nets[[i]] %v% "vertex.names")
+  class.net<- as.data.frame(cbind(youthid, net=1))
+  class.main <- main.raw[main.raw[,"youthid"] %in% youthid,]
+  class.sorted <-merge(class.net, class.main, by="youthid", all.x = T)
+  
+  # Generate node level attribute for each variable in main data
+  v<-names(class.sorted)
+  for (j in 3:length(v)){
+    if (is.factor(class.sorted[,j])) {
+      # This line turns factor variables into strings.
+      nets[[i]] %v% v[j] <- as.character(class.sorted[,j])
+    }
+    else {
+      nets[[i]] %v% v[j] <- class.sorted[,j]
+    }
+  }
+}
+
+
+```
+
+## Adds Wave 1 Data from the achievement survey of the CILS4EU Germany Data
+
+Extract data from achievement survey Germany Wave 1
+```{r warning=FALSE}
+
+achieve.raw <- read.dta13("youth achievement_stata13/w1_ya_ge_v1.2.0_rv.dta")
+
+```
+
+Loop over main survey to find data for students that took part in the classmates friendship survey and achievement survey
+
+```{r}
+
+# Run through all networks
+for (i in 1:length(nets)){
+  
+  # Extract youthids for one network. This will be used to match with the main survey.
+  youthid <- as.numeric(nets[[i]] %v% "vertex.names")
+  class.net<- as.data.frame(cbind(youthid, net=1))
+  class.achieve <- achieve.raw[achieve.raw[,"youthid"] %in% youthid,]
+  class.sorted <-merge(class.net, class.achieve, by="youthid", all.x = T)
+  
+  # Generate node level attribute for each variable in main data
+  v<-names(class.sorted)
+  for (j in 3:length(v)){
+    if (is.factor(class.sorted[,j])) {
+      # This line turns factor variables into strings.
+      nets[[i]] %v% v[j] <- as.character(class.sorted[,j])
+    }
+    else {
+      nets[[i]] %v% v[j] <- class.sorted[,j]
+    }
+  }
+}
+
+```
+
+
+## Recoding
+
+Recoding data to convert string to numeric values for later regression analysis
+
+```{r}
+
+# Let's recode gender so girl = 1 and boy = 0
+
+for (i in 1:length(nets)){
+  y1_sex <- nets[[i]] %v% "y1_sex"
+  y1_sex_recoded <- ifelse(y1_sex == "girl", 1, ifelse(y1_sex == "boy", 0, NA))
+  nets[[i]] %v% "y1_sex_recoded" <-  y1_sex_recoded
+}
+
+# Let's recode country of birth so no answer = NA, Germany = 1, outside Germany = 2
+
+
+for (i in 1:length(nets)){
+  y1_cobRV <- nets[[i]] %v% "y1_cobRV"
+  y1_cobRV_recoded <- ifelse(y1_cobRV == "no answer", NA, ifelse(y1_cobRV == "survey country", 1, ifelse(y1_cobRV == "outside survey country", 2,  NA)))
+  nets[[i]] %v% "y1_cobRV_recoded" <-  y1_cobRV_recoded
+}
+
+
+# Let's recode mother employment status so no answer = NA, Employed = 1, Unemployed = 2
+
+for (i in 1:length(nets)){
+  y1_emplm <- nets[[i]] %v% "y1_emplm"
+  y1_emplm_recoded <- ifelse(y1_emplm == "no answer", NA, ifelse(y1_emplm == "dont know", NA, ifelse(y1_emplm == "question not asked", NA,
+                                                                                                     ifelse(y1_emplm == "yes", 1,ifelse(y1_emplm == "no", 0,  NA)))))
+  nets[[i]] %v% "y1_emplm_recoded" <-  y1_emplm_recoded
+}
+
+# Let's recode father employment status so no answer = NA, Employed = 1, Unemployed = 0
+
+for (i in 1:length(nets)){
+  y1_emplf <- nets[[i]] %v% "y1_emplf"
+  y1_emplf_recoded <- ifelse(y1_emplf == "no answer", NA, ifelse(y1_emplf == "dont know", NA, ifelse(y1_emplf == "question not asked", NA, ifelse(y1_emplf == "yes", 1,
+                                                                                                                                               ifelse(y1_emplf == "no", 0,  NA)))))
+  nets[[i]] %v% "y1_emplf_recoded" <-  y1_emplf_recoded
+}
+
+
+# Let's recode third level education of mother so no answer = NA, other missing = NA, Question not asked = NA, Don't Know = NA 
+# yes = 1, no = 0
+
+for (i in 1:length(nets)){
+  y1_educm3 <- nets[[i]] %v% "y1_educm3"
+  y1_educm3_recoded <- ifelse(y1_educm3 == "no answer", NA, ifelse(y1_educm3 == "other missing", NA, ifelse(y1_educm3 == "question not asked", NA, ifelse(y1_educm3 == "dont know", NA,
+  ifelse(y1_educm3 == "yes", 1, ifelse(y1_educm3 == "no", 0,  NA))))))
+  nets[[i]] %v% "y1_educm3_recoded" <-  y1_educm3_recoded
+}
+
+
+# Let's recode third level education of father so no answer = NA, other missing = NA, Question not asked = NA, Don't Know = NA 
+# yes = 1, no = 0
+
+for (i in 1:length(nets)){
+  y1_educf3 <- nets[[i]] %v% "y1_educf3"
+  y1_educf3_recoded <- ifelse(y1_educf3 == "no answer", NA, ifelse(y1_educf3 == "other missing", NA, ifelse(y1_educf3 == "question not asked", NA, ifelse(y1_educf3 == "dont know", NA, ifelse(y1_educf3 == "yes", 1, ifelse(y1_educf3 == "no", 0,  NA))))))
+  nets[[i]] %v% "y1_educf3_recoded" <-  y1_educf3_recoded
+}
+
+
+# Let's recode attitude education importance so no answer = NA, other missing = NA
+#Strongly Agree = 5, Agree = 4, Neither agree nor disagree = 3, Disagree = 2, Strongly disagree = 1
+
+for (i in 1:length(nets)){
+  nets[[i]] %v% "y1_valed1"
+  y1_valed1 <- nets[[i]] %v% "y1_valed1"
+  y1_valed1_recoded <- ifelse(y1_valed1 == "no answer", NA,
+                              ifelse(y1_valed1 == "other missing", NA,
+                                     ifelse(y1_valed1 == "strongly agree", 5,
+                                     ifelse(y1_valed1 == "agree", 4,
+                                     ifelse(y1_valed1 == "neither agree nor disagree", 3,
+                                            ifelse(y1_valed1 == "disagree", 2,
+                                                   ifelse(y1_valed1 == "strongly disagree", 1, NA)))))))
+  nets[[i]] %v% "y1_valed1_recoded" <- y1_valed1_recoded
+}
+
+
+# Let's recode second language spoken at home. no answer = NA, Yes = 1, No = 0
+
+for (i in 1:length(nets)){
+  y1_loc1 <- nets[[i]] %v% "y1_loc1"
+  y1_loc1_recoded <- ifelse(y1_loc1 == "no answer", NA, ifelse(y1_loc1 == "yes", 1, ifelse(y1_loc1 == "no", 0,  NA)))
+  nets[[i]] %v% "y1_loc1_recoded" <-  y1_loc1_recoded
+}
+
+```
+
+Saving created network data
+
+```{r}
+
+#Setting new working directory to save network data and attributes saved as network
+
+setwd("~/University/Project/R")
+knitr::opts_knit$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = normalizePath("~/University/Project/Code"))
+setwd("~/University/Project/R")
+save(nets, file="cils_ge_nets.Rdata")
+rm(list=ls())
+
+#Load saved network data
+
+load(file="cils_ge_nets.Rdata")
+
+
+```
+
+## Collating data to dataframe
+
+Function that calculates degree where only nodes with certain attributes are considered. 
+
+```{r}
+
+#Function that calculates degree where only certain attributes are considered
+
+degree_attr<- function(net, attr, value,...){
+  v.attr<-get.vertex.attribute(net, attr)
+  adj.matrix<-as.matrix(net)
+  sna::degree
+network::get.vertex.attribute
+  v.adj.matrix <- adj.matrix * t(matrix(rep((v.attr == value), network.size(net)), nrow=network.size(net)))
+  degree(v.adj.matrix,...)
+}
+
+```
+
+Creating empty Master Data Frame and looping attributes to be added from networks into data frame structure
+
+```{r}
+master_df <- data.frame()
+
+for (i in 1:length(nets)){
+  youthid<- nets[[i]] %v% "vertex.names"
+  gender <- nets[[i]] %v% "y1_sex_recoded"
+  country_birth <- nets[[i]] %v% "y1_cobRV_recoded"
+  maths_score <- nets[[i]] %v% "y1_gradem_ge"
+  language_score <- nets[[i]] %v% "y1_lat_sum"
+  eng_score <- nets[[i]] %v% "y1_gradee_ge"
+  ger_score <- nets[[i]] %v% "y1_gradesc_ge"
+  cognitive_score <- nets[[i]] %v% "y1_cot_sum"
+  maths_score_rev <- nets[[i]] %v% "maths_score_rev" <- 7 - maths_score
+  ger_score_rev<- nets[[i]] %v% "ger_score_rev" <- 7 - ger_score
+  eng_score_rev <- nets[[i]] %v% "eng_score_rev" <- 7 - eng_score
+  cognitive_rec <- nets[[i]] %v% "cognitive_rec" <- cognitive_score/6
+  lang_rec <- nets[[i]] %v% "lang_rec" <- language_score/6
+  country_birth <- nets[[i]] %v% "country_birth" <- country_birth
+  mother_employ <- nets[[i]] %v% "y1_emplm_recoded"
+  father_employ <- nets[[i]] %v% "y1_emplf_recoded"
+  mother_educate3 <- nets[[i]] %v% "y1_educm3_recoded"
+  father_educate3 <- nets[[i]] %v% "y1_educf3_recoded"
+  school_attitude <- nets[[i]] %v% "y1_sat2" #1 is very unsatisfied and 10 is very satisfied with school
+  lang_2 <- nets[[i]] %v% "y1_loc1_recoded"
+  value_education <- nets[[i]] %v% "y1_valed1_recoded"
+  number_of_native_friends <- degree_attr(nets[[i]], attr="y1_cobRV", value="survey country", cmode="outdegree")
+  number_of_migrant_friends <- degree_attr(nets[[i]], attr="y1_cobRV", value="outside survey country", cmode="outdegree")
+  outdeg<-degree(nets[[i]],cmode="outdegree")
+  df<- data.frame(youthid=as.numeric(youthid), gender, country_birth, maths_score_rev=as.numeric(maths_score_rev), lang_rec=as.numeric(lang_rec),
+             eng_score_rev=as.numeric(eng_score_rev), ger_score_rev=as.numeric(ger_score_rev), cognitive_rec=as.numeric(cognitive_rec),
+             mother_employ, father_employ, outdeg, number_of_native_friends = as.numeric(number_of_native_friends),
+             number_of_migrant_friends=as.numeric(number_of_migrant_friends), mother_employ, mother_educate3, father_employ,
+             father_educate3, lang_2, school_attitude=as.numeric(school_attitude), value_education)
+  master_df <- rbind(master_df, df)
+}
+
+
+
+```
+
+
+Checking dataframe was created successfully
+```{r include=FALSE}
+
+#Checking dimensions of dataframe to see if it loaded correctly
+dim(master_df)
+
+#Loading tidyr to run the dropna function on dataframe
+library(tidyr)
+master_df %>% drop_na()
+
+
+```
+
+Adding more data to dataframe
+
+```{r}
+
+#Creating column with share of migrant friends
+master_df$share_mig <- master_df$number_of_migrant_friends / (master_df$number_of_migrant_friends + master_df$number_of_native_friends)
+
+
+#Creating column with total number of friends
+master_df$number_of_friends<- master_df$number_of_migrant_friends + master_df$number_of_native_friends
+
+```
+
+
+## Analysing Data
+
+
+Statistics on data
+
+```{r}
+#How many students in our survey?
+
+nrow(master_df) #1517 students
+
+#How many classes in our analysis?
+
+length(nets) #93 classrooms/networks
+
+#How many male and female in our network?
+
+table(master_df$gender) #741 Females, 774 Males
+
+#How many migrants in network?
+
+table(master_df$country_birth) #1334 Natives, 173 Migrants
+```
+
+Creating Summary Statistics Table
+
+```{r}
+
+#Loading stargazer library to create tables
+library(stargazer)
+
+#Applying mean function and saving to a new dataframe.
+#Calculates mean of columns in master_df dataframe
+Summ_DF<-sapply(master_df,FUN=mean, na.rm = T)
+
+#Calculates median of columns in master_df dataframe and saves to new variable
+Med<-sapply(master_df,FUN=median, na.rm = T)
+
+#Calculates standard deviation of cola in master_df and save to new variable
+Standard_Dev<-sapply(master_df,FUN=sd, na.rm = T)
+
+#Calculates minimum of columns in master_df dataframe and saves to new variable
+Minm <- sapply(master_df,FUN=min, na.rm = T)
+
+#Calculates maximum of columns in master_df dataframe and saves to new variable
+Maxm <- sapply(master_df,FUN=max, na.rm = T)
+
+#Calculates inter quartile range of cols in master_df and saves to new variable
+InQuar <- sapply(master_df,FUN=IQR, na.rm = T)
+
+#Adding all the summary statistics gathered and saving to one dataframe
+Summ_DF <- cbind(Summ_DF, Med, Standard_Dev, Minm, Maxm, InQuar)
+
+
+#Creating function that will round all the values down in our dataframe
+round_df <- function(x, digits) {
+    # round all numeric variables
+    # x: data frame 
+    # digits: number of digits to round
+    numeric_columns <- sapply(x, mode) == 'numeric'
+    x[numeric_columns] <-  round(x[numeric_columns], digits)
+    x
+}
+
+#Applying rounding function and saving to new dataframe Summ_DF2
+Summ_DF2 <- round_df(Summ_DF, 2)
+
+#Creating new dataframe with new row and col names and some ordinal values drop
+Summary_Dat <- Summ_DF2[-c(1, 2, 3, 9, 10, 14, 15, 16, 17, 18), ] 
+colnames(Summary_Dat) <- c("Mean","Median","Standard Deviation","Minimum","Maximum","IQR")
+rownames(Summary_Dat)<- c("Maths Score","Language Score","English Score","German Score","Cognitive Score",
+                          "Outdegree", "Native Friends", "Migrant Friends","Attitude to School","Value of Education",
+                          "Share of Migrant Friends", "Total Friends")
+
+#Creating summary statistics table to add to dissertation
+stargazer(Summary_Dat,header=F,type ='html',title ="Summary Statistics",out ="Summ_Stats")
+
+```
+
+Network Stats
+```{r}
+
+#Loading sna library to conduct social network analysis
+library(sna)
+
+#NETWORK LEVEL STATS
+
+#Calculate Network Density of our networks
+
+Network_Density <- gden(nets) #Network density levels. 0 = Nobody is connected.
+
+#Creating Network Density scatter plot
+par(mfrow=c(1,2))
+plot(Network_Density, ylab = "Network Density", main = "Network Density Plot",
+     pch = 19, col = "blue")
+abline(h=mean(Network_Density), col="red") #Add red line where the mean is on plot
+legend("topright", c("Mean of Network Density"), #Add a legend
+       col = c("red"), lty = c(1), lwd = c(1),
+       xpd=TRUE, inset=c(0,0), cex=0.55, bty='n')
+mean(Network_Density) #Checking mean value of network density
+
+
+#Calculating Network Transitivity of our networks
+
+Network_Transitivity <- gtrans(nets) #Transitivity scores. Network level measure for each network 1 is all triads, 0 no triads
+
+#Network Transitivity scatter plot
+plot(Network_Transitivity, ylab = "Network Transitivity", main = "Network Transitivity Plot",
+     pch = 19, col = "blue")
+abline(h=mean(Network_Transitivity), col="red") #Add red line where the mean is on plot
+legend("topright", c("Mean of Network Transitivity"), #Add a legend
+       col = c("red"), lty = c(1), lwd = c(1),
+       xpd=TRUE, inset=c(0,0), cex=0.55, bty='n')
+mean(Network_Transitivity) #Checking mean value of network transitivity
+
+#NODE LEVEL STATS
+par(mfrow=c(1,1))
+
+#Calculate degree centrality of nodes in our networks
+Network_Degree_Central <- sna::degree(nets,cmode="outdegree")
+
+#Creating histogram of Network Degree Centrality scores
+hist(Network_Degree_Central, main = "Network Degree Centrality Score",
+     xlab="Node Degree Centrality Scores",  breaks=seq(0,6.5,1),  col = "light blue")
+abline(v=mean(Network_Degree_Central), col="red") #Add red line where the mean is on plot
+legend("topright", c("Mean Degree Centrality"), #Add a legend
+       col = c("red"), lty = c(1), lwd = c(1),
+       xpd=TRUE, inset=c(0,0), cex=0.55, bty='n')
+mean(Network_Degree_Central) #Checking mean value of degree centrality
+
+```
+
+
+Histogram of the students last maths, german and english grades in school
+Histogram of the tests of language and cognitive ability conducted by CILS4EU team
+
+```{r}
+
+par(mfrow=c(1,2))
+hist(master_df$maths_score_rev, main = "Maths Score",
+     xlab="Grade", ylab="Maths Score",  breaks=seq(0.5,6.5,1), col = "light blue")
+
+hist(master_df$ger_score_rev, main = "German School Score",
+     xlab="Grade", ylab="German Score",  breaks=seq(0.5,6.5,1), col = "light blue")
+
+hist(master_df$eng_score_rev, main = "English School Score",
+     xlab="Grade", ylab="English Score",  breaks=seq(0.5,6.5,1), col = "light blue")
+
+hist(master_df$lang_rec, main = "CILS4EU Language Score",
+     xlab="Grade", ylab="No. Students", breaks=seq(0,6.5,1), col = "light blue")
+
+par(mfrow=c(1,1))
+hist(master_df$cognitive_rec, main = "CILS4EU Cognitive Score",
+     xlab="Grade", ylab="No. Students", breaks=seq(0,6.5,1), col = "light blue")
+
+```
+
+
+Barplot of how many migrants there are compared to natives in study
+
+```{r}
+
+barplot(table(master_df$country_birth), names.arg=c("German","Migrant"), col = "light blue", ylim=c(0,1400))
+title("Number of Native Germans and Migrants")
+
+```
+
+
+```{r}
+
+barplot(table(master_df$gender), names.arg=c("Female", "Male"), col = "light blue", ylim=c(0,800))
+title("Number Female and Male Students")
+
+```
+
+
+Barplot of how many migrant students have a second language
+
+```{r}
+
+barplot(table(master_df$lang_2), names.arg=c("No 2nd Language", "2nd Language"), col = "light blue", ylim=c(0,1000))
+title("Second Language of Migrants")
+
+```
+
+Histograms of share migrant friends and share of migrants in the schools
+
+```{r}
+
+hist(master_df$share_mig, main = "Share Migrant Friends",
+     xlab="Percentage Share Migrant Friends", ylab="Number Students", breaks=seq(0,1,0.2), col = "light blue")
+
+
+```
+
+Barplots of employment status of parents
+
+```{r}
+par(mfrow=c(1,2))
+
+barplot(table(master_df$mother_employ), names.arg=c("Unemployed","Employed"), col = "light blue", ylim=c(0,1200))
+title("Mother Employment")
+
+barplot(table(master_df$father_employ), names.arg=c("Unemployed","Employed"), col = "light blue", ylim=c(0,1200))
+title("Father Employment")
+
+```
+
+Barplots of level 3rd Level Education of parents
+
+```{r}
+
+par(mfrow=c(1,2))
+
+barplot(table(master_df$mother_educate3), names.arg=c("No 3rd Level", "3rd Level"), col = "light blue", ylim=c(0,1200))
+title("Mother 3rd Level Education")
+
+barplot(table(master_df$father_educate3), names.arg=c("No 3rd Level", "3rd Level"), col = "light blue", ylim=c(0,1200))
+title("Father 3rd Level Education")
+
+
+```
+
+Histograms on attitude of students to education and their perceived value of education
+
+```{r}
+
+par(mfrow=c(1,2))
+
+hist(master_df$value_education, main = "Value of Education Attitude",
+     xlab="How Important is Education", ylab="Number Students",breaks=seq(0,5,1),col = "light blue", ylim=c(0,1200))
+
+hist(master_df$school_attitude, main = "Attitude Towards School",
+     xlab="Attitudes Towards School", ylab="Number Students", breaks=seq(0,10,1), col = "light blue",  ylim=c(0,350))
+
+
+```
+
+## Regressions
+
+First I will run regressions studying natives only against share migrant friends
+
+```{r}
+
+#Maths score regressed against share migrant friends, gender and total number of friends
+m1<-lm(maths_score_rev~share_mig + gender + number_of_friends + father_employ + mother_employ + father_educate3 + mother_educate3 + school_attitude + value_education, data=master_df[master_df$country_birth=="1",])
+summary(m1)
+
+#German score regressed against share migrant friends, gender and total number of friends
+m2<-lm(ger_score_rev~share_mig + gender + number_of_friends + father_employ + mother_employ + father_educate3 + mother_educate3 + school_attitude + value_education, data=master_df[master_df$country_birth=="1",])
+summary(m2)
+
+#English score regressed against share migrant friends, gender and total number of friends
+m3<-lm(eng_score_rev~share_mig + gender + number_of_friends + father_employ + mother_employ + father_educate3 + mother_educate3 + school_attitude + value_education, data=master_df[master_df$country_birth=="1",])
+summary(m3)
+
+#Language score regressed against share migrant friends, gender and total number of friends
+m4<-lm(lang_rec~share_mig + gender + number_of_friends + father_employ + mother_employ + father_educate3 + mother_educate3 + school_attitude + value_education, data=master_df[master_df$country_birth=="1",])
+summary(m4)
+
+#Cognitive score regressed against share migrant friends, gender and total number of friends
+m5<-lm(cognitive_rec~share_mig + gender + number_of_friends + father_employ + mother_employ + father_educate3 + mother_educate3 + school_attitude + value_education, data=master_df[master_df$country_birth=="1",])
+summary(m5)
+
+
+```
+
+Running regressions for migrants only against share migrant friends
+
+```{r}
+
+#Maths score regressed against share native friends, gender and total number of friends
+m01<-lm(maths_score_rev~share_mig + gender + number_of_friends + father_employ + mother_employ + father_educate3 + mother_educate3 + school_attitude + value_education + lang_2, data=master_df[master_df$country_birth=="2",])
+summary(m01)
+
+#German score regressed against share native friends, gender and total number of friends
+m02<-lm(ger_score_rev~share_mig + gender + number_of_friends + father_employ + mother_employ + father_educate3 + mother_educate3 + school_attitude + value_education + lang_2, data=master_df[master_df$country_birth=="2",])
+summary(m02)
+
+#English score regressed against share native friends, gender and total number of friends
+m03<-lm(eng_score_rev~share_mig + gender + number_of_friends + father_employ + mother_employ + father_educate3 + mother_educate3 + school_attitude + value_education + lang_2, data=master_df[master_df$country_birth=="2",])
+summary(m03)
+
+#Language score regressed against share native friends, gender and total number of friends
+m04<-lm(lang_rec~share_mig + gender + number_of_friends + father_employ + mother_employ + father_educate3 + mother_educate3 + school_attitude + value_education + lang_2, data=master_df[master_df$country_birth=="2",])
+summary(m04)
+
+#Cognitive score regressed against share native friends, gender and total number of friends
+m05<-lm(cognitive_rec~share_mig + gender + number_of_friends + father_employ + mother_employ + father_educate3 + mother_educate3 + school_attitude + value_education + lang_2, data=master_df[master_df$country_birth=="2",])
+summary(m05)
+
+```
+
+Running regression analysis on the five native models to test assumptions of linear regression models
+
+```{r}
+
+par(mfrow=c(1,2))
+plot(m1)
+plot(m2)
+plot(m3)
+plot(m4)
+plot(m5)
+
+```
+
+Running regression analysis on the six migrant models to test assumptions of linear regression models
+
+```{r}
+
+par(mfrow=c(1,2))
+plot(m01)
+plot(m02)
+plot(m03)
+plot(m04)
+plot(m05)
+
+```
+
+
+
+## Network Plots
+
+```{r}
+
+#Plotting network number 13 with node size corresponding to academic score
+
+#Red plots are Migrant Students. Black plots are Native Students
+
+#MATHS SCORE NETWORK
+
+par(mfrow=c(1,2))
+set.seed(123) #Setting seed so all network plots run will look the same
+plot(nets[[13]], vertex.cex = "maths_score_rev", vertex.col = "country_birth", displaylabels=F, title = "Maths Score Network")
+legend("bottomleft", inset=.02,
+       c("Migrant","Native"), fill=c("red","black"), horiz=TRUE, cex=0.8)
+title(main = "Maths Score Network")
+
+#GERMAN SCORE NETWORK
+
+set.seed(123) #Setting seed so all network plots run will look the same
+plot(nets[[13]], vertex.cex = "ger_score_rev", vertex.col = "country_birth", displaylabels=F)
+legend("bottomleft", inset=.02,
+       c("Migrant","Native"), fill=c("red","black"), horiz=TRUE, cex=0.8)
+title(main = "German Score Network")
+
+#ENGLISH SCORE NETWORK
+
+set.seed(123)#Setting seed so all network plots run will look the same
+plot(nets[[13]], vertex.cex = "eng_score_rev", vertex.col = "country_birth", displaylabels=F)
+legend("bottomleft", inset=.02,
+       c("Migrant","Native"), fill=c("red","black"), horiz=TRUE, cex=0.8)
+title(main = "English Score Network")
+
+#LANGUAGE SCORE NETWORK
+
+set.seed(123)#Setting seed so all network plots run will look the same
+plot(nets[[13]], vertex.cex = "lang_rec", vertex.col = "country_birth", displaylabels=F)
+legend("bottomleft", inset=.02,
+       c("Migrant","Native"), fill=c("red","black"), horiz=TRUE, cex=0.8)
+title(main = "Language Score Network")
+
+#COGNITIVE SCORE NETWORK
+
+set.seed(123)#Setting seed so all network plots run will look the same
+plot(nets[[13]], vertex.cex = "cognitive_rec", vertex.col = "country_birth", displaylabels=F)
+legend("bottomleft", inset=.02,
+       c("Migrant","Native"), fill=c("red","black"), horiz=TRUE, cex=0.8)
+title(main = "Cognitive Score Network")
+
+```
+
+## Regression Tables
+
+Regression Table of the Native Student Models
+
+```{r include=FALSE}
+
+stargazer(m1,m2,m3,m4,m5,header=F,type ='html',title ="Native Academic Scores Against Share Migrant Friends",out ="Nat_Models")
+
+```
+Regression Table of the Migrant Student Models
+
+```{r echo=TRUE}
+
+stargazer(m01,m02,m03,m04,m05,header=F,type ='html',title ="Migrant Academic Scores Against Share Migrant Friends",out ="Mig_Models")
+
+```
